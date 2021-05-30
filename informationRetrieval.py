@@ -4,6 +4,9 @@ from collections import defaultdict
 from collections import Counter
 from nltk.corpus import wordnet
 from sklearn.cluster import KMeans
+import time
+
+
 # Add your import statements here
 
 
@@ -13,6 +16,7 @@ class InformationRetrieval():
 
 	def __init__(self):
 		self.index = None
+		# self.translator = str.maketrans('', '', string.punctuation)
 
 	def buildIndex(self, docs, docIDs):
 		"""
@@ -44,6 +48,11 @@ class InformationRetrieval():
 		words = []
 		for doc in docs:
 			for sent in doc:
+				print(sent,'\n')
+			break
+		for doc in docs:
+			for sent in doc:
+				# sent = sent1.translate(self.translator)
 				for word in sent:
 					if not word.isalpha():
 						if '-' in word:
@@ -147,7 +156,8 @@ class InformationRetrieval():
 		for doc in docIDs:
 			 for i, word in enumerate(unq_words):
 				 if wordCntDoc[doc][word] > 0:
-					 mat[i][doc] = entropy[i]*(1 + np.log(wordCntDoc[doc][word]))
+					 mat[i][doc] = idf[i]*(1 + np.log(wordCntDoc[doc][word]))
+					#  mat[i][doc] = idf[i]*(wordCntDoc[doc][word])
 				 else:
 					 mat[i][doc] = 0
 				#  mat[i][doc] = idf[i]*(np.log(wordCntDoc[doc][word]+1))
@@ -162,7 +172,8 @@ class InformationRetrieval():
 		# K Components
 		print("Mat shape:",mat.shape,"U shape:",U.shape)
 		print("S shape:",np.diag(s).shape, "Vh shape:",Vh.shape)
-		self.k = 650
+		self.k = 300
+		# self.k = 875 for entropy
 
 		# matd = U @ np.diag(s) @ Vh
 		print("Check",np.allclose(mat, np.dot(U[:, :s.shape[0]] * s, Vh)))
@@ -181,7 +192,8 @@ class InformationRetrieval():
 		self.U = self.U[:,:self.k]
 		self.Vh = self.s @ Vh
 		self.Vh = self.Vh[:self.k]
-
+		self.V = self.Vh.T
+		print("Document SVD Shape:",self.V.shape)
 
 		self.wordCntDoc = wordCntDoc
 		self.docs = docs
@@ -189,8 +201,24 @@ class InformationRetrieval():
 		self.idf = idf
 		self.index = mat
 		self.unq_words = unq_words
+		for i in range(self.V.shape[0]):
+			if(np.linalg.norm(self.V[i]) == 0):
+				self.V[i] = self.V[i]
+				continue
+			self.V[i] = self.V[i] / (np.linalg.norm(self.V[i]))
+
+		self.kmeans = KMeans(n_clusters=4, random_state=0).fit(self.V)
+		self.centers = self.kmeans.cluster_centers_
+		self.c2labels = self.kmeans.predict(self.centers)
+		self.doc2c = defaultdict(int)
+		self.labels = self.kmeans.labels_
+		self.label2id = defaultdict(list)
+		for i, ids in enumerate(docIDs):
+			self.doc2c[ids] = self.labels[i]
+			self.label2id[self.labels[i]].append(ids)
 		print("K :",self.k)
 		print("Total Vocab : ",len(unq_words))
+		
 		# self.index = index
 
 
@@ -213,7 +241,7 @@ class InformationRetrieval():
 		"""
 
 		# Getting Vector for Query
-
+		start = time.time()
 		q = len(queries)
 		doc_IDs_ordered = []
 		for query in queries:
@@ -222,15 +250,6 @@ class InformationRetrieval():
 
 			for sent in query:
 				for word in sent:
-					# cnt[word] += 1
-					# if word.isalpha():
-					# 	cnt[word.lower()] += 1
-					# else:
-					# 	if '-' in word:
-					# 		sword = word.lower()
-					# 		l = sword.lower().split('-')
-					# 		cnt[l[0]] += 1
-					# 		cnt[l[1]] += 1
 					if word.isalpha():
 						if len(wordnet.synsets(word.lower())) > 0:
 							cnt[wordnet.synsets(word.lower())[0].name()] += 1
@@ -253,22 +272,13 @@ class InformationRetrieval():
 			for i, word in enumerate(self.unq_words):
 				if cnt[word] > 0:
 					vec[i][0] = self.idf[i]*(cnt[word])
-					# vec[i][0] = self.idf[i]*(1+np.log(cnt[word]))
 				else:
 					vec[i][0] = self.idf[i]*(0)
-				# if word == "aeroelastic":
-				# 	print(self.idf[i], cnt[word])
-				# print(word, cnt[word], self.idf[i])
-			# scores = np.zeros(self.docIDs[-1]+1)
 			scores = [[0, 0] for _ in range(self.docIDs[-1]+1)]
-			# print("S shape:",self.s.shape)
-			# print("U.T shape:",self.U.T.shape, "vec shape:",vec.shape, "Vh[:,1] shape:",self.Vh[:,1].reshape(self.k,1).shape)
 			vec = np.linalg.inv(self.sigma) @ self.U.T @ vec
-			# Shape of Vec : (k,k) @ (k,vocab) @ (vocab,1) = (k, 1)
-			# Shape of Vh : (k, num_docs), Shape of self.Vh[:,idx] : (k,1)
-			# print("Norm of query : ",np.linalg.norm(vec))
-			for idx in self.docIDs:
-				# sc = np.dot(vec, self.index[:,idx])
+			vec = vec / np.linalg.norm(vec)
+			cluster = self.kmeans.predict(vec.T)
+			for idx in self.label2id[cluster[0]]:
 				sc = np.dot(vec.T, self.Vh[:,idx].reshape(self.k,1))
 				if np.linalg.norm(vec) == 0.0 or np.linalg.norm(self.Vh[:,idx]) == 0.0:
 					scores[idx] = [0, idx]
@@ -276,34 +286,14 @@ class InformationRetrieval():
 				sc = sc / np.linalg.norm(vec) 
 				sc = sc / np.linalg.norm(self.Vh[:,idx])
 				scores[idx] = [sc, idx]
-				# scores[idx-1] = [sc, idx, np.linalg.norm(vec), np.linalg.norm(self.index[idx,:]),np.dot(vec, self.index[idx,:])]
-			# rem = scores[485]
 			scores.sort(reverse=True)
-		
-			
-			# doc_IDs_ordered = []
 			order = []
 			for sc, idx in scores:
 				order.append(idx+1)
 			doc_IDs_ordered.append(order)
-			# for idx in order[:5]:
-			# 	print("------------------------")
-			# 	sent = ""
-			# 	for line in self.docs[idx-1]:
-			# 		sent += " ".join(x for x in line)
-			# 		# sent += ""
-			# 	print(sent)
-			
-			# print(scores[:5])
-			# print("Rem : ",rem)
-			# print("----------------------------")
-			# sent = ""
-			# for line in self.docs[485]:
-			# 	sent += " ".join(x for x in line)
-			# 	# sent += ". "
-			# print(sent)
 		#Fill in code here
-
-
+		end = time.time()
+		print("TIME TAKEN: {:.4f}s".format(end-start))
 	
 		return doc_IDs_ordered
+
